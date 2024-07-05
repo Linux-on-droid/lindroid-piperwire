@@ -26,6 +26,8 @@
 #include <pipewire/impl.h>
 #include <pipewire/i18n.h>
 
+#include <pthread.h>
+
 /** \page page_module_fallback_sink Lindroid Sink
  *
  * Lindroid sink, which passses data to host lindroid app
@@ -41,6 +43,17 @@
 
 PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
+
+#define AUDIO_OUTPUT_PREFIX 0x01
+#define AUDIO_INPUT_PREFIX 0x02
+
+#define BUFFER_SIZE 102400
+
+static uint8_t audio_buffer[BUFFER_SIZE];
+static size_t audio_buffer_start = 0;
+static size_t audio_buffer_end = 0;
+static pthread_mutex_t buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t buffer_cond = PTHREAD_COND_INITIALIZER;
 
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Luka Panio <lukapanio@gmail.com>" },
@@ -71,6 +84,7 @@ struct impl {
 	struct spa_hook sink_listener;
 
 	struct pw_properties *properties;
+	struct pw_properties *source_properties;
 
 	struct bitmap sink_ids;
 	struct bitmap fallback_sink_ids;
@@ -83,10 +97,51 @@ struct impl {
 	int audio_socket_fd;
 
 	struct spa_audio_info_raw info;
+	struct spa_audio_info_raw source_info;
 	struct pw_properties *stream_props;
+	struct pw_properties *source_stream_props;
 	struct pw_stream *stream;
+	struct pw_stream *source_stream;
 	struct spa_hook stream_listener;
+	struct spa_hook source_stream_listener;
 };
+
+static void* socket_receive_thread(void* arg) {
+    struct impl *impl = (struct impl*)arg;
+    uint8_t temp_buffer[10241];
+    ssize_t bytesRead;
+
+    while (1) {
+        bytesRead = recv(impl->audio_socket_fd, temp_buffer, sizeof(temp_buffer), 0);
+        if (bytesRead <= 0) {
+            pw_log_error("Failed to receive audio data: %m");
+            continue;
+        }
+
+        // Check if the packet starts with 0x02
+        if (temp_buffer[0] != 0x02) {
+            pw_log_error("Invalid packet start byte, expected 0x02");
+            continue;
+        }
+
+        pthread_mutex_lock(&buffer_mutex);
+
+        // Start copying from the second byte
+        for (ssize_t i = 1; i < bytesRead; ++i) {
+            audio_buffer[audio_buffer_end] = temp_buffer[i];
+            audio_buffer_end = (audio_buffer_end + 1) % BUFFER_SIZE;
+            if (audio_buffer_end == audio_buffer_start) {
+                audio_buffer_start = (audio_buffer_start + 1) % BUFFER_SIZE;
+            }
+        }
+
+        pthread_cond_signal(&buffer_cond);
+        pthread_mutex_unlock(&buffer_mutex);
+    }
+
+    return NULL;
+}
+
 
 static void stream_destroy(void *d)
 {
@@ -132,7 +187,16 @@ static void playback_stream_process(void *d)
 	data = SPA_PTROFF(bd->data, offs, void);
 
 	if (impl->audio_socket_fd != -1) {
-		ssize_t sent = send(impl->audio_socket_fd, data, size, 0);
+		if(size>=10239) {
+			pw_log_error("buffer too big");
+			return;
+		}
+
+		uint8_t prefixed_data[size + 1];
+		prefixed_data[0] = AUDIO_OUTPUT_PREFIX;
+		memcpy(prefixed_data + 1, data, size);
+
+		ssize_t sent = send(impl->audio_socket_fd, prefixed_data, size + 1, 0);
 		if (sent == -1) {
 			pw_log_error("Failed to send audio data: %m");
 		} else {
@@ -144,12 +208,65 @@ static void playback_stream_process(void *d)
 	pw_stream_queue_buffer(impl->stream, buf);
 }
 
+static void source_playback_process(void *data) {
+	struct pw_buffer *b;
+	struct spa_buffer *buf;
+	uint8_t *dst;
+	struct impl *impl = (struct impl*)data;
+
+	if ((b = pw_stream_dequeue_buffer(impl->source_stream)) == NULL) {
+		pw_log_debug("Out of playback buffers: %m");
+		return;
+	}
+
+	buf = b->buffer;
+	if ((dst = buf->datas[0].data) == NULL)
+		return;
+
+	buf->datas[0].chunk->offset = 0;
+	buf->datas[0].chunk->stride = 4;
+	buf->datas[0].chunk->size = 0;
+
+	size_t requested_size = SPA_MIN(b->requested * 4, buf->datas[0].maxsize);
+	size_t available_size = 0;
+
+	pthread_mutex_lock(&buffer_mutex);
+	while (audio_buffer_start == audio_buffer_end) {
+		pthread_cond_wait(&buffer_cond, &buffer_mutex); // Wait for data to be available
+	}
+
+	if (audio_buffer_end > audio_buffer_start) {
+		available_size = audio_buffer_end - audio_buffer_start;
+	} else {
+		available_size = BUFFER_SIZE - audio_buffer_start;
+	}
+
+	size_t copy_size = SPA_MIN(requested_size, available_size);
+	memcpy(dst, audio_buffer + audio_buffer_start, copy_size);
+	audio_buffer_start = (audio_buffer_start + copy_size) % BUFFER_SIZE;
+
+	pthread_mutex_unlock(&buffer_mutex);
+
+	buf->datas[0].chunk->size = copy_size;
+	b->size = copy_size / 4;
+
+	pw_stream_queue_buffer(impl->source_stream, b);
+}
+
 static const struct pw_stream_events playback_stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = stream_destroy,
 	.state_changed = stream_state_changed,
 	.process = playback_stream_process
 };
+
+static const struct pw_stream_events input_stream_events = {
+	PW_VERSION_STREAM_EVENTS,
+	.destroy = stream_destroy,
+	.state_changed = stream_state_changed,
+	.process = source_playback_process
+};
+
 
 static int create_stream(struct impl *impl)
 {
@@ -162,12 +279,19 @@ static int create_stream(struct impl *impl)
 	impl->stream = pw_stream_new(impl->core, "Lindroid sink", impl->stream_props);
 	impl->stream_props = NULL;
 
-	if (impl->stream == NULL)
+	impl->source_stream = pw_stream_new(impl->core, "Lindroid source", impl->source_stream_props);
+	impl->source_stream_props = NULL;
+
+	if (impl->stream == NULL || impl->source_stream == NULL)
 		return -errno;
 
 	pw_stream_add_listener(impl->stream,
 			&impl->stream_listener,
 			&playback_stream_events, impl);
+
+	pw_stream_add_listener(impl->source_stream,
+			&impl->source_stream_listener,
+			&input_stream_events, impl);
 
 	n_params = 0;
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
@@ -176,6 +300,20 @@ static int create_stream(struct impl *impl)
 
 	if ((res = pw_stream_connect(impl->stream,
 			PW_DIRECTION_INPUT,
+			PW_ID_ANY,
+			PW_STREAM_FLAG_AUTOCONNECT |
+			PW_STREAM_FLAG_MAP_BUFFERS |
+			PW_STREAM_FLAG_RT_PROCESS,
+			params, n_params)) < 0)
+		return res;
+
+	n_params = 0;
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	params[n_params++] = spa_format_audio_raw_build(&b,
+			SPA_PARAM_EnumFormat, &impl->source_info);
+
+	if ((res = pw_stream_connect(impl->source_stream,
+			PW_DIRECTION_OUTPUT,
 			PW_ID_ANY,
 			PW_STREAM_FLAG_AUTOCONNECT |
 			PW_STREAM_FLAG_MAP_BUFFERS |
@@ -553,12 +691,26 @@ static void parse_audio_info(const struct pw_properties *props, struct spa_audio
 	parse_position(info, "FL,FR", strlen("FL,FR"));
 }
 
+static void parse_audio_info_mic(const struct pw_properties *props, struct spa_audio_info_raw *info)
+{
+        const char *str;
+
+        spa_zero(*info);
+        info->format = format_from_name("S16", strlen("S16"));
+        info->rate = 48000;
+
+        info->channels = 1;
+        info->channels = 1;
+        parse_position(info, "MONO", strlen("MONO"));
+}
+
 
 SPA_EXPORT
 int pipewire__module_init(struct pw_impl_module *module, const char *args)
 {
 	struct pw_context *context = pw_impl_module_get_context(module);
 	struct pw_properties *props = NULL;
+	struct pw_properties *source_props = NULL;
 	struct impl *impl = NULL;
 	const char *str;
 	int res;
@@ -582,8 +734,23 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	}
 	impl->properties = props;
 
+	source_props = pw_properties_new(NULL, NULL);
+	if (source_props == NULL) {
+		res = -errno;
+		pw_log_error( "can't create properties: %m");
+		goto error;
+	}
+	impl->source_properties = source_props;
+
 	impl->stream_props = pw_properties_new(NULL, NULL);
 	if (impl->stream_props == NULL) {
+		res = -errno;
+		pw_log_error( "can't create properties: %m");
+		goto error;
+	}
+
+	impl->source_stream_props = pw_properties_new(NULL, NULL);
+	if (impl->source_stream_props == NULL) {
 		res = -errno;
 		pw_log_error( "can't create properties: %m");
 		goto error;
@@ -615,8 +782,33 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	pw_properties_set(impl->stream_props, PW_KEY_NODE_VIRTUAL, "true");
 	pw_properties_set(impl->stream_props, "monitor.channel-volumes", "true");
 
-
 	parse_audio_info(impl->stream_props, &impl->info);
+
+
+	// TBD: Do not assume channel count/location
+	pw_properties_setf(source_props, SPA_KEY_AUDIO_RATE, "%u", 48000);
+	pw_properties_setf(source_props, SPA_KEY_AUDIO_CHANNELS, "%u", 1);
+	pw_properties_set(source_props, SPA_KEY_AUDIO_POSITION, "MONO");
+
+	pw_properties_set(source_props, PW_KEY_MEDIA_CLASS, "Audio/Source");
+	pw_properties_set(source_props, PW_KEY_FACTORY_NAME, "support.null-audio-source");
+	pw_properties_set(source_props, PW_KEY_NODE_VIRTUAL, "true");
+	pw_properties_set(source_props, "monitor.channel-volumes", "true");
+
+	pw_properties_set(impl->source_stream_props, PW_KEY_NODE_NAME, "Lindroid Source");
+	pw_properties_set(impl->source_stream_props, PW_KEY_NODE_DESCRIPTION, "Lindroid audio input");
+
+    // TBD: Do not assume channel count/location
+	pw_properties_setf(impl->source_stream_props, SPA_KEY_AUDIO_RATE, "%u", 48000);
+	pw_properties_setf(impl->source_stream_props, SPA_KEY_AUDIO_CHANNELS, "%u", 1);
+	pw_properties_set(impl->source_stream_props, SPA_KEY_AUDIO_POSITION, "MONO");
+
+	pw_properties_set(impl->source_stream_props, PW_KEY_MEDIA_CLASS, "Audio/Source");
+	pw_properties_set(impl->source_stream_props, PW_KEY_FACTORY_NAME, "support.null-audio-source");
+	pw_properties_set(impl->source_stream_props, PW_KEY_NODE_VIRTUAL, "true");
+	pw_properties_set(impl->source_stream_props, "monitor.channel-volumes", "true");
+
+	parse_audio_info_mic(impl->source_stream_props, &impl->source_info);
 
 	impl->core = pw_context_get_object(impl->context, PW_TYPE_INTERFACE_Core);
 	if (impl->core == NULL) {
@@ -661,6 +853,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if ((res = create_stream(impl)) < 0)
 		goto error;
 
+	// Start socket recieve thread
+	pthread_t thread_id;
+	if (pthread_create(&thread_id, NULL, socket_receive_thread, impl) != 0) {
+		pw_log_error("Failed to create socket receive thread");
+		goto error;
+	}
 
 	return 0;
 
