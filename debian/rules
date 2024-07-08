@@ -1,0 +1,18 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	dh_auto_configure -- \
+	-DCMAKE_INSTALL_PREFIX=/usr \
+	-DCMAKE_BUILD_TYPE=Release
+
+override_dh_auto_build:
+	dh_auto_build
+
+override_dh_auto_install:
+	dh_auto_install
+	install -d debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3
+	install -m 644 obj-$(DEB_HOST_GNU_TYPE)/output/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3/libpipewire-module-lindroid.so debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3/
