@@ -1,0 +1,2 @@
+usr/lib/*/pipewire-0.3/*.so
+lindroid.conf usr/share/pipewire/pipewire.conf.d/

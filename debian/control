@@ -1,0 +1,13 @@
+Source: libpipewire-module-lindroid
+Section: libs
+Priority: optional
+Maintainer: Your Name <lukapanio@gmail.com>
+Build-Depends: debhelper (>= 9), cmake, pipewire, libpipewire-0.3-dev
+Standards-Version: 4.5.0
+Homepage: https://lindroid.org
+
+Package: libpipewire-module-lindroid
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, pipewire
+Description: PipeWire module lindroid
+ This package provides the PipeWire module lindroid.

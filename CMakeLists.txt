@@ -1,9 +1,19 @@
 cmake_minimum_required(VERSION 3.10)
-project(audio_socket_pipewire)
+project(lindroid LANGUAGES C)
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(PIPEWIRE REQUIRED libpipewire-0.3)
+# PipeWire and SPA paths
+set(PIPEWIRE_INCLUDE_DIR /usr/include/pipewire-0.3)
+set(SPA_INCLUDE_DIR /usr/include/spa-0.2)
 
-add_library(pipewire-module-lindroid SHARED module-lindroid.c)
-target_include_directories(pipewire-module-lindroid  PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
-target_link_libraries(pipewire-module-lindroid  PRIVATE ${PIPEWIRE_LIBRARIES})
+# Include directories
+include_directories(${PIPEWIRE_INCLUDE_DIR} ${SPA_INCLUDE_DIR} include)
+
+# Source files
+set(SOURCES module-lindroid.c)
+
+# Create shared library
+add_library(pipewire-module-lindroid SHARED ${SOURCES})
+target_link_libraries(pipewire-module-lindroid pipewire-0.3)
+set_target_properties(pipewire-module-lindroid PROPERTIES
+    OUTPUT_NAME "pipewire-module-lindroid"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/output/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}/pipewire-0.3")
