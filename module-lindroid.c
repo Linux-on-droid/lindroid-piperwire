@@ -766,7 +766,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	pw_properties_set(props, PW_KEY_MEDIA_CLASS, "Audio/Sink");
 	pw_properties_set(props, PW_KEY_FACTORY_NAME, "support.null-audio-sink");
-	pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
+	pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "false");
 	pw_properties_set(props, "monitor.channel-volumes", "true");
 
 	pw_properties_set(impl->stream_props, PW_KEY_NODE_NAME, "Lindroid Sink");
@@ -779,7 +779,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	pw_properties_set(impl->stream_props, PW_KEY_MEDIA_CLASS, "Audio/Sink");
 	pw_properties_set(impl->stream_props, PW_KEY_FACTORY_NAME, "support.null-audio-sink");
-	pw_properties_set(impl->stream_props, PW_KEY_NODE_VIRTUAL, "true");
+	pw_properties_set(impl->stream_props, PW_KEY_NODE_VIRTUAL, "false");
 	pw_properties_set(impl->stream_props, "monitor.channel-volumes", "true");
 
 	parse_audio_info(impl->stream_props, &impl->info);
@@ -792,7 +792,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	pw_properties_set(source_props, PW_KEY_MEDIA_CLASS, "Audio/Source");
 	pw_properties_set(source_props, PW_KEY_FACTORY_NAME, "support.null-audio-source");
-	pw_properties_set(source_props, PW_KEY_NODE_VIRTUAL, "true");
+	pw_properties_set(source_props, PW_KEY_NODE_VIRTUAL, "false");
 	pw_properties_set(source_props, "monitor.channel-volumes", "true");
 
 	pw_properties_set(impl->source_stream_props, PW_KEY_NODE_NAME, "Lindroid Source");
@@ -805,7 +805,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	pw_properties_set(impl->source_stream_props, PW_KEY_MEDIA_CLASS, "Audio/Source");
 	pw_properties_set(impl->source_stream_props, PW_KEY_FACTORY_NAME, "support.null-audio-source");
-	pw_properties_set(impl->source_stream_props, PW_KEY_NODE_VIRTUAL, "true");
+	pw_properties_set(impl->source_stream_props, PW_KEY_NODE_VIRTUAL, "false");
 	pw_properties_set(impl->source_stream_props, "monitor.channel-volumes", "true");
 
 	parse_audio_info_mic(impl->source_stream_props, &impl->source_info);
