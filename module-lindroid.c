@@ -867,5 +867,5 @@ error_errno:
 error:
 	if (impl)
 		impl_destroy(impl);
-	return res;
+	return 0;
 }
